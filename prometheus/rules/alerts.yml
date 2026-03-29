@@ -1,0 +1,104 @@
+groups:
+
+  # ── Alertes symptôme métier ───────────────────────────────────────────────
+  - name: api.slo
+    rules:
+
+      # Alerte 1 — Taux d'erreur HTTP élevé (symptôme métier)
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.005
+        for: 2m
+        labels:
+          service: demo-api
+          severity: critical
+          env: production
+        annotations:
+          summary: "Taux d'erreur 5xx dépasse 0,5% sur demo-api"
+          description: |
+            Le taux d'erreurs HTTP 5xx est actuellement {{ printf "%.2f" $value | humanizePercentage }}
+            sur les 5 dernières minutes. Le SLO de disponibilité (99,5% de succès) est en danger.
+          runbook: |
+            1. Ouvrir le dashboard N2 Diagnostic : http://localhost:3000/d/api-diagnostic
+            2. Identifier l'endpoint fautif (panneau "Erreurs par endpoint")
+            3. Consulter les logs du container : docker logs demo-api --tail 100
+            4. Vérifier la charge CPU/RAM sur le dashboard système
+          dashboard: "http://localhost:3000/d/api-overview"
+
+      # Alerte 2 — Latence p95 élevée (symptôme métier)
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le, endpoint)
+          ) > 0.5
+        for: 3m
+        labels:
+          service: demo-api
+          severity: warning
+          env: production
+        annotations:
+          summary: "Latence p95 dépasse 500ms sur {{ $labels.endpoint }}"
+          description: |
+            Le 95e percentile de latence sur l'endpoint {{ $labels.endpoint }}
+            est {{ $value | humanizeDuration }}. Le SLO de latence (p95 ≤ 500ms) est dépassé.
+          runbook: |
+            1. Vérifier le dashboard N2 panneau "Latence par endpoint"
+            2. Contrôler la saturation CPU/RAM (peut indiquer du throttling)
+            3. Chercher un pic de trafic récent sur le panneau "Requêtes/s"
+          dashboard: "http://localhost:3000/d/api-overview"
+
+  # ── Alertes saturation système ────────────────────────────────────────────
+  - name: system.saturation
+    rules:
+
+      # Alerte 3 — Mémoire disponible faible
+      - alert: LowMemoryAvailable
+        expr: |
+          (
+            node_memory_MemAvailable_bytes
+            /
+            node_memory_MemTotal_bytes
+          ) < 0.10
+        for: 5m
+        labels:
+          service: node-exporter
+          severity: warning
+          env: production
+        annotations:
+          summary: "Mémoire disponible inférieure à 10% sur {{ $labels.instance }}"
+          description: |
+            Seulement {{ $value | humanizePercentage }} de mémoire disponible
+            depuis plus de 5 minutes. Risque d'OOM killer.
+          runbook: |
+            1. Identifier les processus consommateurs : docker stats
+            2. Vérifier si un container a une fuite mémoire
+            3. Envisager un redémarrage du service le plus consommateur
+          dashboard: "http://localhost:3000/d/system-overview"
+
+  # ── Alertes qualité de collecte ───────────────────────────────────────────
+  - name: prometheus.health
+    rules:
+
+      # Alerte 4 — Target de scrape DOWN
+      - alert: PrometheusTargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          env: production
+        annotations:
+          summary: "Target Prometheus DOWN : {{ $labels.job }} / {{ $labels.instance }}"
+          description: |
+            La cible {{ $labels.instance }} (job: {{ $labels.job }}) est inaccessible
+            depuis plus de 1 minute. Les métriques ne sont plus collectées.
+          runbook: |
+            1. Vérifier l'état du container : docker ps -a
+            2. Consulter les logs : docker logs <container>
+            3. Vérifier la connectivité réseau entre Prometheus et la cible
+            4. Ouvrir Prometheus Targets : http://localhost:9090/targets
+          dashboard: "http://localhost:9090/targets"
